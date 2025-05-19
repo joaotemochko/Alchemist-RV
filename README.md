@@ -54,6 +54,9 @@ Este repositório inclui:
 - Exemplos de código e tutoriais
 - Ferramentas de depuração e análise de desempenho
 
+## SIMULAÇÃO
+AINDA EM DESENVOLVIMENTO, NÃO SIMULADO EM NENHUM CASO DE USO!
+
 O Alchemist RV64 inclui:
 Extensões de segurança: RV PMP (Physical Memory Protection)
 TEE: Trusted Execution Environment com zona segura isolada
