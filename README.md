@@ -45,13 +45,6 @@ O Alchemist RV64 é ideal para:
 - Processamento gráfico de alta qualidade
 - Servidores compactos com baixo consumo energético
 
-## 📊 Benchmarks de Desempenho (Projeção)
-Componente Benchmark Pontuação Comparação
-- Big Cores SPECint2017 ~70 Superior ao ARM Cortex-A78C
-- Little Cores SPECint2017 ~28 Superior ao ARM Cortex-A57
-- GPU 3DMark Wildlife ~9000 Superior à Adreno 830
-- Eficiência DMIPS/mW 3.8 Excelente eficiência energética
-
 ## 🛠 Ferramentas de Desenvolvimento
 Este repositório inclui:
 - Documentação técnica detalhada
