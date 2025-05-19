@@ -1,7 +1,7 @@
 <svg viewBox="0 0 1000 800" xmlns="http://www.w3.org/2000/svg">
   <!-- Background -->
   <rect x="0" y="0" width="1000" height="800" fill="#f8f9fa" />
-  <text x="500" y="40" font-family="Arial" font-size="24" text-anchor="middle" font-weight="bold">Arquitetura do SoC Alchemist RV64 (4nm)</text>
+  <text x="500" y="40" font-family="Arial" font-size="24" text-anchor="middle" font-weight="bold">Arquitetura do SoC Alchemist RV64</text>
   
   <!-- Main SoC outline -->
   <rect x="50" y="70" width="900" height="700" rx="20" ry="20" fill="#e6e6e6" stroke="#333" stroke-width="2" />
@@ -128,8 +128,4 @@
   
   <!-- Connecting components to NoC -->
   <path d="M 300 650 L 300 660 M 500 675 L 530 600 M 500 675 L 300 580 M 500 675 L 730 700" stroke="#666" stroke-width="2" stroke-dasharray="5,3" />
-  
-  <!-- Performance Indicators -->
-  <text x="500" y="720" font-family="Arial" font-size="12" text-anchor="middle" font-style="italic">Performance: Big Cores SPECint2017 ~70 | Little Cores SPECint2017 ~28 | GPU 3DMark Wildlife ~9000</text>
-  <text x="500" y="740" font-family="Arial" font-size="12" text-anchor="middle" font-style="italic">Process: 4nm | Power Efficiency: 3.8 DMIPS/mW</text>
 </svg>
