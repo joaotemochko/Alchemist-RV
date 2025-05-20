@@ -1,6 +1,8 @@
 # 🧪 Alchemist RV: 64-bit RISC-V Architecture
 
 ## 📋 Overview
+![SoC Alchemist RV](./img/alchemist_soc_architecture.svg)
+
 Alchemist RV is a heterogeneous 64-bit RISC-V based System-on-Chip (SoC) architecture designed at 4nm (but can be manufactured or adapted in any lithography), aimed at delivering high performance and energy efficiency through a big.LITTLE configuration with an integrated GPU. This repository contains documentation, technical specifications, and resources for developers interested in working with this platform.
 
 ## 🔍 Technical Specifications
