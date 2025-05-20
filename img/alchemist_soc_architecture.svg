@@ -1,7 +1,7 @@
 <svg viewBox="0 0 1000 800" xmlns="http://www.w3.org/2000/svg">
   <!-- Background -->
   <rect x="0" y="0" width="1000" height="800" fill="#f8f9fa" />
-  <text x="500" y="40" font-family="Arial" font-size="24" text-anchor="middle" font-weight="bold">Arquitetura do SoC Alchemist RV64</text>
+  <text x="500" y="40" font-family="Arial" font-size="24" text-anchor="middle" font-weight="bold">SoC Alchemist RV 1770</text>
   
   <!-- Main SoC outline -->
   <rect x="50" y="70" width="900" height="700" rx="20" ry="20" fill="#e6e6e6" stroke="#333" stroke-width="2" />
