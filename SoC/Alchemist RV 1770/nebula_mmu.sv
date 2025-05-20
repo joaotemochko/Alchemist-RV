@@ -163,9 +163,9 @@ always_comb begin
         end
         
         CHECK_PTE: begin
-            if (!pte_t.v || (!pte_t.r && pte_t.w)) begin
+            if (!pte.v || (!pte.r && pte.w)) begin
                 next_state = FAULT;
-            end else if (pte_t.r || pte_t.x) begin
+            end else if (pte.r || pte.x) begin
                 // Leaf PTE found
                 // Update TLB
                 next_state = IDLE;
@@ -187,7 +187,7 @@ end
 
 // TLB update logic
 always_ff @(posedge clk) begin
-    if (state == CHECK_PTE && (pte_t.r || pte_t.x)) begin
+    if (state == CHECK_PTE && (pte.r || pte.x)) begin
         // Find LRU entry
         automatic int lru_entry = 0;
         for (int i = 0; i < TLB_ENTRIES; i++) begin

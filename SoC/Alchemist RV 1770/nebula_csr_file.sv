@@ -78,10 +78,7 @@ always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         // Initialize CSRs
         mstatus <= '0;
-        misa <= (1 << 12) | // 'M'
-             (1 << 8)  | // 'I'
-             (1 << 18) | // 'S'
-             (1 << 20);  // 'U'
+        misa <= (1 << ('M' - 'A')) | (1 << ('I' - 'A')) | (1 << ('S' - 'A')) | (1 << ('U' - 'A'));
         mtvec_reg <= 'h1000_0000;
         mie_reg <= '0;
         mscratch_reg <= '0;

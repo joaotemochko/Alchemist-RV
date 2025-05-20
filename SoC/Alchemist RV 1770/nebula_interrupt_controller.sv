@@ -42,12 +42,9 @@ always_comb begin
     end
 end
 
-// Declaration of genvar hart
-genvar hart;
-
 // Priority encoder for each hart
 generate
-    for (hart = 0; hart < NUM_HARTS; hart++) begin : priority_encoder
+    for (genvar hart = 0; hart < NUM_HARTS; hart++) begin : priority_encoder
         always_comb begin
             highest_priority_cause[hart] = '0;
             highest_priority_irq[hart] = '0;
