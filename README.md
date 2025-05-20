@@ -18,6 +18,7 @@ Alchemist RV is a heterogeneous 64-bit RISC-V based System-on-Chip (SoC) archite
 - Cache: L1 64KB (I+D) per core, L2 1.5MB per core
 
 ### 💫 Little Cores - "Nebula"
+![RTL Nebula Core](./img/nebula_core_RTLView_page-0001.jpg)
 - Microarchitecture: Nebula RV64I  
 - ISA: RV64I (64-bit integer base)  
 - Frequency: 1.8 GHz  
@@ -53,15 +54,15 @@ This repository includes:
 - Code examples and tutorials  
 - Debugging and performance analysis tools
 
-## SIMULATION
-STILL UNDER DEVELOPMENT, NOT YET SIMULATED FOR ANY USE CASE!
-
 Alchemist RV64 includes:
 - Security Extensions: RV PMP (Physical Memory Protection)  
 - TEE: Trusted Execution Environment with isolated secure zone  
 - Accelerated cryptography: AES, SHA, RSA, ECC via hardware  
 - Secure Boot: Cryptographic verification during boot  
 - Trust Zone: Physical separation between secure and non-secure zones
+
+## SIMULATION
+STILL UNDER DEVELOPMENT, NOT YET SIMULATED FOR ANY USE CASE!
 
 ## 👥 Contributions
 Contributions are currently CLOSED, but will soon be open and welcome to anyone interested in contributing to the project.
