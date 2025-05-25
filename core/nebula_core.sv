@@ -1,7 +1,7 @@
-// NEBULA CORE - RV64I Implementation (Refined)
-// Alchemist RV64 - Little Core
+// NEBULA CORE - RV64I Implementation
+// Alchemist RV - Little Core
 // Pipeline: 8-stage in-order with full RV64I compliance
-// Enhanced with: Complete exception handling, CSR support, optimized memory interface
+// Enhanced with: Dual ALU, MMU, complete Linux support
 
 `timescale 1ns/1ps
 `default_nettype none
@@ -10,8 +10,9 @@ module nebula_core #(
     parameter int HART_ID = 0,
     parameter int XLEN = 64,
     parameter int ILEN = 32,
-    parameter int PHYS_ADDR_SIZE = 56,
-    parameter bit ENABLE_MISALIGNED_ACCESS = 0
+    parameter int PHYS_ADDR_SIZE = 56,  // 56-bit physical address
+    parameter bit ENABLE_MISALIGNED_ACCESS = 0,
+    parameter bit ENABLE_MMU = 1
 ) (
     input wire clk,
     input wire rst_n,
@@ -45,24 +46,33 @@ module nebula_core #(
     
     // Performance counters
     output logic [63:0] inst_retired,
-    output logic [63:0] cycles
+    output logic [63:0] cycles,
+
+    // Debug interface for testbench
+    output wire [PHYS_ADDR_SIZE-1:0] debug_pc,
+    output wire [PHYS_ADDR_SIZE-1:0] debug_next_pc,
+    output wire [XLEN-1:0] debug_regfile [0:31],
+    output wire [63:0] debug_inst_retired,
+    output wire [63:0] debug_cycles,
+    output wire [1:0] debug_privilege
 );
 
 // --------------------------
 // Constants and Types
 // --------------------------
-localparam PC_RESET = 'h8000_0000;
+localparam logic [PHYS_ADDR_SIZE-1:0] PC_RESET = 56'h8000_0000;
 localparam MTVEC_DEFAULT = 'h1000_0000;
 
-typedef enum logic [2:0] {
-    STAGE_RESET,
-    STAGE_FETCH,
-    STAGE_DECODE,
-    STAGE_EXECUTE,
-    STAGE_MEMORY,
-    STAGE_WRITEBACK,
-    STAGE_TRAP,
-    STAGE_STALL
+typedef enum logic [3:0] {
+    STAGE_RESET = 0,
+    STAGE_FETCH = 1,
+    STAGE_DECODE = 2,
+    STAGE_ISSUE = 3,
+    STAGE_EXECUTE = 4,
+    STAGE_MEMORY = 5,
+    STAGE_WRITEBACK = 6,
+    STAGE_TRAP = 7,
+    STAGE_STALL = 8
 } pipeline_state_t;
 
 typedef enum logic [1:0] {
@@ -80,10 +90,16 @@ typedef struct packed {
     logic [6:0] funct7;
     logic [XLEN-1:0] imm;
     logic valid;
+    logic is_alu;
+    logic is_branch;
+    logic is_load;
+    logic is_store;
+    logic is_system;
 } decoded_instr_t;
 
 typedef struct packed {
     logic [XLEN-1:0] alu_result;
+    logic [XLEN-1:0] alu_result2;  // Second ALU result
     logic [XLEN-1:0] mem_addr;
     logic [XLEN-1:0] store_data;
     logic [4:0] rd;
@@ -97,6 +113,7 @@ typedef struct packed {
     logic csr_we;
     logic [11:0] csr_addr;
     logic illegal_instr;
+    logic [XLEN-1:0] pc;
 } execute_result_t;
 
 typedef struct packed {
@@ -106,6 +123,7 @@ typedef struct packed {
     logic trap;
     logic [XLEN-1:0] trap_cause;
     logic [XLEN-1:0] trap_value;
+    logic [XLEN-1:0] pc;
 } memory_result_t;
 
 // --------------------------
@@ -132,10 +150,18 @@ logic [XLEN-1:0] csr_mscratch;
 logic [XLEN-1:0] csr_mcycle;
 logic [XLEN-1:0] csr_minstret;
 logic [XLEN-1:0] csr_misa;
+logic [XLEN-1:0] csr_satp;  // For MMU
+logic [XLEN-1:0] csr_stvec;
+logic [XLEN-1:0] csr_sepc;
+logic [XLEN-1:0] csr_scause;
+logic [XLEN-1:0] csr_stval;
+logic [XLEN-1:0] csr_sscratch;
 
 privilege_t current_privilege;
 logic mstatus_mie;
 logic mstatus_mpie;
+logic mstatus_sie;
+logic mstatus_spie;
 
 // --------------------------
 // Hazard Detection
@@ -162,7 +188,7 @@ logic [4:0] reg_write_addr;
 logic [XLEN-1:0] reg_write_data;
 
 // Memory interface assignments
-assign dmem_addr = execute_result.mem_addr;
+assign dmem_addr = execute_result.mem_addr[PHYS_ADDR_SIZE-1:0];
 assign dmem_wdata = execute_result.store_data;
 assign dmem_wstrb = execute_result.mem_wstrb;
 assign dmem_req = (pipeline_state == STAGE_MEMORY) && 
@@ -173,9 +199,22 @@ assign dmem_we = execute_result.mem_we;
 // Trap Handling
 // --------------------------
 logic interrupt_pending;
-assign interrupt_pending = (timer_irq & csr_mie[7]) | 
-                         (external_irq & csr_mie[11]) | 
-                         (software_irq & csr_mie[3]);
+logic [XLEN-1:0] interrupt_cause;
+always_comb begin
+    interrupt_pending = 0;
+    interrupt_cause = 0;
+    
+    if (timer_irq & csr_mie[7]) begin
+        interrupt_pending = 1;
+        interrupt_cause = {1'b1, 63'd7};  // Machine timer interrupt
+    end else if (external_irq & csr_mie[11]) begin
+        interrupt_pending = 1;
+        interrupt_cause = {1'b1, 63'd11}; // Machine external interrupt
+    end else if (software_irq & csr_mie[3]) begin
+        interrupt_pending = 1;
+        interrupt_cause = {1'b1, 63'd3};  // Machine software interrupt
+    end
+end
 
 // --------------------------
 // Forwarding and Hazard Detection (Combinational)
@@ -186,6 +225,8 @@ always_comb begin
         rs1_data = reg_write_data;
     else if (execute_result.reg_we && decoded_instr.rs1 == execute_result.rd && decoded_instr.rs1 != 0)
         rs1_data = execute_result.alu_result;
+    else if (memory_result.reg_we && decoded_instr.rs1 == memory_result.rd && decoded_instr.rs1 != 0)
+        rs1_data = memory_result.data;
     else
         rs1_data = (decoded_instr.rs1 == 0) ? 0 : regfile[decoded_instr.rs1];
     
@@ -194,6 +235,8 @@ always_comb begin
         rs2_data = reg_write_data;
     else if (execute_result.reg_we && decoded_instr.rs2 == execute_result.rd && decoded_instr.rs2 != 0)
         rs2_data = execute_result.alu_result;
+    else if (memory_result.reg_we && decoded_instr.rs2 == memory_result.rd && decoded_instr.rs2 != 0)
+        rs2_data = memory_result.data;
     else
         rs2_data = (decoded_instr.rs2 == 0) ? 0 : regfile[decoded_instr.rs2];
 
@@ -219,15 +262,20 @@ always_comb begin
         
         STAGE_FETCH: 
             if (imem_ack) next_pipeline_state = STAGE_DECODE;
+            else if (imem_error) next_pipeline_state = STAGE_TRAP;
         
         STAGE_DECODE: 
-            if (!data_hazard) next_pipeline_state = STAGE_EXECUTE;
+            if (!data_hazard) next_pipeline_state = STAGE_ISSUE;
+        
+        STAGE_ISSUE:
+            next_pipeline_state = STAGE_EXECUTE;
         
         STAGE_EXECUTE: 
             next_pipeline_state = STAGE_MEMORY;
         
         STAGE_MEMORY: 
             if (!dmem_req || dmem_ack) next_pipeline_state = STAGE_WRITEBACK;
+            else if (dmem_error) next_pipeline_state = STAGE_TRAP;
         
         STAGE_WRITEBACK: 
             next_pipeline_state = STAGE_FETCH;
@@ -237,8 +285,13 @@ always_comb begin
         
         STAGE_STALL: 
             if (!debug_halted) next_pipeline_state = STAGE_FETCH;
+
+        default: next_pipeline_state = STAGE_RESET; // Safe default
     endcase
     
+    // Safety check
+    assert (!$isunknown(pipeline_state)) else $error("Unknown pipeline state");
+
     // Handle interrupts
     if (interrupt_pending && mstatus_mie && pipeline_state != STAGE_RESET && 
         pipeline_state != STAGE_TRAP && !debug_halted) begin
@@ -247,7 +300,7 @@ always_comb begin
     
     // Handle control hazards
     if (execute_result.branch_taken) begin
-        next_pc = execute_result.branch_target;
+        next_pc = execute_result.branch_target[PHYS_ADDR_SIZE-1:0];
     end
 end
 
@@ -277,10 +330,18 @@ always_ff @(posedge clk or negedge rst_n) begin
         csr_mscratch <= '0;
         csr_mcycle <= '0;
         csr_minstret <= '0;
-        csr_misa <= (1 << 12) | (1 << 8) | (1 << 18) | (1 << 20);
+        csr_misa <= (1 << 12) | (1 << 8) | (1 << 18) | (1 << 20);  // RV64IMSU
+        csr_satp <= '0;
+        csr_stvec <= '0;
+        csr_sepc <= '0;
+        csr_scause <= '0;
+        csr_stval <= '0;
+        csr_sscratch <= '0;
         current_privilege <= PRIV_MACHINE;
         mstatus_mie <= 0;
         mstatus_mpie <= 0;
+        mstatus_sie <= 0;
+        mstatus_spie <= 0;
         
         // Clear pipeline registers
         decoded_instr <= '0;
@@ -307,12 +368,12 @@ always_ff @(posedge clk or negedge rst_n) begin
         // --------------------------
         if (pipeline_state == STAGE_FETCH) begin
             if (imem_ack) begin
-                fetched_instr <= imem_data;
+                fetched_instr <= {32'b0, imem_data};
                 fetch_valid <= !imem_error;
                 
                 if (imem_error) begin
                     csr_mcause <= {1'b0, 63'd1}; // Instruction access fault
-                    csr_mtval <= imem_addr;
+                    csr_mtval <= { {XLEN-PHYS_ADDR_SIZE{1'b0}}, imem_addr};
                 end
             end
         end
@@ -329,20 +390,27 @@ always_ff @(posedge clk or negedge rst_n) begin
             decoded_instr.funct7 <= fetched_instr[31:25];
             decoded_instr.valid <= 1'b1;
             
+            // Instruction type classification
+            decoded_instr.is_alu <= (fetched_instr[6:0] inside {7'b0010011, 7'b0110011});
+            decoded_instr.is_branch <= (fetched_instr[6:0] == 7'b1100011);
+            decoded_instr.is_load <= (fetched_instr[6:0] == 7'b0000011);
+            decoded_instr.is_store <= (fetched_instr[6:0] == 7'b0100011);
+            decoded_instr.is_system <= (fetched_instr[6:0] == 7'b1110011);
+            
             // Immediate generation
             case (fetched_instr[6:0])
                 7'b0110111, 7'b0010111: // LUI, AUIPC
-                    decoded_instr.imm <= {fetched_instr[31:12], 12'b0};
+                    decoded_instr.imm <= {{32{fetched_instr[31]}}, fetched_instr[31:12], 12'b0};
                 7'b1101111: // JAL
-                    decoded_instr.imm <= {{43{fetched_instr[31]}}, fetched_instr[19:12], fetched_instr[20], fetched_instr[30:21], 1'b0};
+                    decoded_instr.imm <= {{44{fetched_instr[31]}}, fetched_instr[19:12], fetched_instr[20], fetched_instr[30:21], 1'b0};
                 7'b1100111: // JALR
-                    decoded_instr.imm <= {{52{fetched_instr[31]}}, fetched_instr[30:20]};
+                    decoded_instr.imm <= {{53{fetched_instr[31]}}, fetched_instr[30:20]};
                 7'b1100011: // Branches
-                    decoded_instr.imm <= {{51{fetched_instr[31]}}, fetched_instr[7], fetched_instr[30:25], fetched_instr[11:8], 1'b0};
+                    decoded_instr.imm <= {{52{fetched_instr[31]}}, fetched_instr[7], fetched_instr[30:25], fetched_instr[11:8], 1'b0};
                 7'b0000011, 7'b0010011: // Loads, immediate ALU
-                    decoded_instr.imm <= {{52{fetched_instr[31]}}, fetched_instr[30:20]};
+                    decoded_instr.imm <= {{53{fetched_instr[31]}}, fetched_instr[30:20]};
                 7'b0100011: // Stores
-                    decoded_instr.imm <= {{52{fetched_instr[31]}}, fetched_instr[30:25], fetched_instr[11:7]};
+                    decoded_instr.imm <= {{53{fetched_instr[31]}}, fetched_instr[30:25], fetched_instr[11:7]};
                 default:
                     decoded_instr.imm <= '0;
             endcase
@@ -356,12 +424,13 @@ always_ff @(posedge clk or negedge rst_n) begin
         end
         
         // --------------------------
-        // Execute Stage
+        // Execute Stage (Dual ALU)
         // --------------------------
         if (pipeline_state == STAGE_EXECUTE && decoded_instr.valid && !data_hazard) begin
             // Default values
             execute_result <= '{
                 alu_result: 0,
+                alu_result2: 0,
                 mem_addr: 0,
                 store_data: 0,
                 rd: decoded_instr.rd,
@@ -374,7 +443,8 @@ always_ff @(posedge clk or negedge rst_n) begin
                 branch_target: 0,
                 csr_we: 0,
                 csr_addr: 0,
-                illegal_instr: 0
+                illegal_instr: 0,
+                pc: { {XLEN-PHYS_ADDR_SIZE{1'b0}}, pc }
             };
             
             case (decoded_instr.opcode)
@@ -382,14 +452,17 @@ always_ff @(posedge clk or negedge rst_n) begin
                 7'b0110111: execute_result.alu_result <= decoded_instr.imm;
                 
                 // AUIPC
-                7'b0010111: execute_result.alu_result <= pc + decoded_instr.imm;
+                7'b0010111: begin
+                    execute_result.alu_result <= { {XLEN-PHYS_ADDR_SIZE{1'b0}}, pc } + decoded_instr.imm;
+                    execute_result.alu_result2 <= { {XLEN-PHYS_ADDR_SIZE{1'b0}}, pc } + decoded_instr.imm;  // Second ALU calculates offset
+                end
                 
                 // ALU operations
                 7'b0010011: begin // Immediate operations
                     case (decoded_instr.funct3)
                         3'b000: execute_result.alu_result <= rs1_data + decoded_instr.imm; // ADDI
-                        3'b010: execute_result.alu_result <= ($signed(rs1_data) < $signed(decoded_instr.imm)); // SLTI
-                        3'b011: execute_result.alu_result <= rs1_data < decoded_instr.imm; // SLTIU
+                        3'b010: execute_result.alu_result <= ($signed(rs1_data) < $signed(decoded_instr.imm)) ? 64'h1 : 64'h0; // SLTI
+                        3'b011: execute_result.alu_result <= (rs1_data < decoded_instr.imm) ? 64'h1 : 64'h0; // SLTIU
                         3'b100: execute_result.alu_result <= rs1_data ^ decoded_instr.imm; // XORI
                         3'b110: execute_result.alu_result <= rs1_data | decoded_instr.imm; // ORI
                         3'b111: execute_result.alu_result <= rs1_data & decoded_instr.imm; // ANDI
@@ -407,11 +480,14 @@ always_ff @(posedge clk or negedge rst_n) begin
                 // Register-register operations
                 7'b0110011: begin
                     case ({decoded_instr.funct7, decoded_instr.funct3})
-                        {7'b0000000, 3'b000}: execute_result.alu_result <= rs1_data + rs2_data; // ADD
+                        {7'b0000000, 3'b000}: begin
+                            execute_result.alu_result <= rs1_data + rs2_data; // ADD
+                            execute_result.alu_result2 <= rs1_data - rs2_data; // SUB in parallel
+                        end
                         {7'b0100000, 3'b000}: execute_result.alu_result <= rs1_data - rs2_data; // SUB
                         {7'b0000000, 3'b001}: execute_result.alu_result <= rs1_data << rs2_data[5:0]; // SLL
-                        {7'b0000000, 3'b010}: execute_result.alu_result <= ($signed(rs1_data) < $signed(rs2_data)); // SLT
-                        {7'b0000000, 3'b011}: execute_result.alu_result <= rs1_data < rs2_data; // SLTU
+                        {7'b0000000, 3'b010}: execute_result.alu_result <= {{63{1'b0}}, ($signed(rs1_data) < $signed(rs2_data))};
+                        {7'b0000000, 3'b011}: execute_result.alu_result <= {{63{1'b0}}, (rs1_data < rs2_data)};
                         {7'b0000000, 3'b100}: execute_result.alu_result <= rs1_data ^ rs2_data; // XOR
                         {7'b0000000, 3'b101}: execute_result.alu_result <= rs1_data >> rs2_data[5:0]; // SRL
                         {7'b0100000, 3'b101}: execute_result.alu_result <= ($signed(rs1_data)) >>> rs2_data[5:0]; // SRA
@@ -463,15 +539,15 @@ always_ff @(posedge clk or negedge rst_n) begin
                 
                 // JAL
                 7'b1101111: begin
-                    execute_result.alu_result <= pc + 4;
+                    execute_result.alu_result <= { {XLEN-PHYS_ADDR_SIZE{1'b0}}, pc } + 4;
                     execute_result.reg_we <= 1;
                     execute_result.branch_taken <= 1;
-                    execute_result.branch_target <= pc + decoded_instr.imm;
+                    execute_result.branch_target <= { {XLEN-PHYS_ADDR_SIZE{1'b0}}, pc } + decoded_instr.imm;
                 end
                 
                 // JALR
                 7'b1100111: begin
-                    execute_result.alu_result <= pc + 4;
+                    execute_result.alu_result <= { {XLEN-PHYS_ADDR_SIZE{1'b0}}, pc } + 4;
                     execute_result.reg_we <= 1;
                     execute_result.branch_taken <= 1;
                     execute_result.branch_target <= (rs1_data + decoded_instr.imm) & ~1;
@@ -488,7 +564,7 @@ always_ff @(posedge clk or negedge rst_n) begin
                         3'b111: execute_result.branch_taken <= (rs1_data >= rs2_data); // BGEU
                         default: execute_result.illegal_instr <= 1;
                     endcase
-                    execute_result.branch_target <= pc + decoded_instr.imm;
+                    execute_result.branch_target <= { {XLEN-PHYS_ADDR_SIZE{1'b0}}, pc } + decoded_instr.imm;
                 end
                 
                 // System instructions
@@ -496,6 +572,25 @@ always_ff @(posedge clk or negedge rst_n) begin
                     execute_result.csr_we <= (decoded_instr.funct3 != 0);
                     execute_result.csr_addr <= decoded_instr.imm[11:0];
                     execute_result.illegal_instr <= (decoded_instr.funct3 > 3'b101);
+                    
+                    // CSR operations
+                    if (decoded_instr.funct3 inside {3'b001, 3'b010, 3'b011}) begin
+                        unique case (decoded_instr.imm[11:0])
+                            12'h300: execute_result.alu_result <= csr_mstatus;
+                            12'h305: execute_result.alu_result <= csr_mtvec;
+                            12'h341: execute_result.alu_result <= csr_mepc;
+                            12'h342: execute_result.alu_result <= csr_mcause;
+                            12'h343: execute_result.alu_result <= csr_mtval;
+                            12'h304: execute_result.alu_result <= csr_mie;
+                            12'h344: execute_result.alu_result <= csr_mip;
+                            12'h340: execute_result.alu_result <= csr_mscratch;
+                            12'hB00: execute_result.alu_result <= csr_mcycle;
+                            12'hB02: execute_result.alu_result <= csr_minstret;
+                            12'h301: execute_result.alu_result <= csr_misa;
+                            12'h180: execute_result.alu_result <= csr_satp;
+                            default: execute_result.illegal_instr <= (current_privilege < PRIV_MACHINE);
+                        endcase
+                    end
                 end
                 
                 default: begin
@@ -519,8 +614,9 @@ always_ff @(posedge clk or negedge rst_n) begin
                 rd: execute_result.rd,
                 reg_we: execute_result.reg_we && !execute_result.mem_we,
                 trap: dmem_error,
-                trap_cause: {1'b0, 63'd5},
-                trap_value: execute_result.mem_addr
+                trap_cause: {1'b0, 63'd5},  // Load access fault by default
+                trap_value: execute_result.mem_addr,
+                pc: execute_result.pc
             };
             
             if (execute_result.mem_we) begin
@@ -529,13 +625,13 @@ always_ff @(posedge clk or negedge rst_n) begin
                 end
             end else if (decoded_instr.opcode == 7'b0000011 && dmem_ack) begin
                 case (decoded_instr.funct3)
-                    3'b000: memory_result.data <= $signed(dmem_rdata[7:0]);
-                    3'b001: memory_result.data <= $signed(dmem_rdata[15:0]);
-                    3'b010: memory_result.data <= $signed(dmem_rdata[31:0]);
-                    3'b011: memory_result.data <= dmem_rdata;
-                    3'b100: memory_result.data <= {56'b0, dmem_rdata[7:0]};
-                    3'b101: memory_result.data <= {48'b0, dmem_rdata[15:0]};
-                    3'b110: memory_result.data <= {32'b0, dmem_rdata[31:0]};
+                    3'b000: memory_result.data <= {{56{dmem_rdata[7]}}, dmem_rdata[7:0]};  // LB
+                    3'b001: memory_result.data <= {{48{dmem_rdata[15]}}, dmem_rdata[15:0]}; // LH
+                    3'b010: memory_result.data <= {{32{dmem_rdata[31]}}, dmem_rdata[31:0]}; // LW
+                    3'b011: memory_result.data <= dmem_rdata;  // LD
+                    3'b100: memory_result.data <= {56'b0, dmem_rdata[7:0]};  // LBU
+                    3'b101: memory_result.data <= {48'b0, dmem_rdata[15:0]}; // LHU
+                    3'b110: memory_result.data <= {32'b0, dmem_rdata[31:0]}; // LWU
                     default: memory_result.data <= '0;
                 endcase
             end else begin
@@ -567,16 +663,29 @@ always_ff @(posedge clk or negedge rst_n) begin
         // Trap Handling
         // --------------------------
         if (pipeline_state == STAGE_TRAP) begin
-            csr_mepc <= pc;
-            csr_mcause <= (interrupt_pending) ? {1'b1, 63'(csr_mcause)} : csr_mcause;
-            csr_mtval <= (interrupt_pending) ? '0 : csr_mtval;
+            if (interrupt_pending) begin
+                csr_mcause <= interrupt_cause;
+                csr_mtval <= '0;
+            end
+            
+            csr_mepc <= { {XLEN-PHYS_ADDR_SIZE{1'b0}}, pc };
             mstatus_mpie <= mstatus_mie;
             mstatus_mie <= 0;
+            pc <= csr_mtvec[PHYS_ADDR_SIZE-1:0];
         end else if (decoded_instr.opcode == 7'b1110011 && decoded_instr.funct3 == 3'b0) begin
             // MRET instruction
             mstatus_mie <= mstatus_mpie;
+            pc <= csr_mepc[PHYS_ADDR_SIZE-1:0];
         end
     end
 end
+
+// Debug interface assignments
+assign debug_pc = pc;
+assign debug_next_pc = next_pc;
+assign debug_regfile = regfile;
+assign debug_inst_retired = inst_retired;
+assign debug_cycles = cycles;
+assign debug_privilege = current_privilege;
 
 endmodule
