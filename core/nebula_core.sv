@@ -2,6 +2,7 @@
 // Alchemist RV - Little Core
 // Pipeline: 8-stage in-order with full RV64I compliance
 // Enhanced with: Dual ALU, MMU, complete Linux support
+// Added input queues for memory interfaces
 
 `timescale 1ns/1ps
 `default_nettype none
@@ -10,9 +11,10 @@ module nebula_core #(
     parameter int HART_ID = 0,
     parameter int XLEN = 64,
     parameter int ILEN = 32,
-    parameter int PHYS_ADDR_SIZE = 56,  // 56-bit physical address
+    parameter int PHYS_ADDR_SIZE = 56,
     parameter bit ENABLE_MISALIGNED_ACCESS = 0,
-    parameter bit ENABLE_MMU = 1
+    parameter bit ENABLE_MMU = 1,
+    parameter int INPUT_QUEUE_DEPTH = 4
 ) (
     input wire clk,
     input wire rst_n,
@@ -20,9 +22,9 @@ module nebula_core #(
     // Instruction memory interface
     output logic [PHYS_ADDR_SIZE-1:0] imem_addr,
     output logic imem_req,
-    input wire [ILEN-1:0] imem_data,
-    input wire imem_ack,
-    input wire imem_error,
+    input wire [ILEN-1:0] imem_data_in,
+    input wire imem_ack_in,
+    input wire imem_error_in,
     
     // Data memory interface
     output logic [PHYS_ADDR_SIZE-1:0] dmem_addr,
@@ -31,8 +33,8 @@ module nebula_core #(
     output logic dmem_req,
     output logic dmem_we,
     input wire [XLEN-1:0] dmem_rdata,
-    input wire dmem_ack,
-    input wire dmem_error,
+    input wire dmem_ack_in,
+    input wire dmem_error_in,
     
     // Interrupt interface
     input wire timer_irq,
@@ -56,6 +58,194 @@ module nebula_core #(
     output wire [63:0] debug_cycles,
     output wire [1:0] debug_privilege
 );
+
+// --------------------------
+// Queue Structures
+// --------------------------
+typedef struct packed {
+    logic [PHYS_ADDR_SIZE-1:0] addr;
+    logic valid;
+} imem_queue_entry_t;
+
+typedef struct packed {
+    logic [PHYS_ADDR_SIZE-1:0] addr;
+    logic [XLEN-1:0] wdata;
+    logic [7:0] wstrb;
+    logic we;
+    logic valid;
+} dmem_queue_entry_t;
+
+typedef struct packed {
+    logic ack;
+    logic error;
+    logic [ILEN-1:0] data;
+} imem_response_t;
+
+typedef struct packed {
+    logic ack;
+    logic error;
+    logic [XLEN-1:0] data;
+} dmem_response_t;
+
+// Request Queues
+imem_queue_entry_t imem_queue [0:INPUT_QUEUE_DEPTH-1];
+dmem_queue_entry_t dmem_queue [0:INPUT_QUEUE_DEPTH-1];
+
+// Response Queues
+imem_response_t imem_response_queue [0:INPUT_QUEUE_DEPTH-1];
+dmem_response_t dmem_response_queue [0:INPUT_QUEUE_DEPTH-1];
+
+// Queue Pointers
+logic [$clog2(INPUT_QUEUE_DEPTH)-1:0] imem_queue_head = 0, imem_queue_tail = 0;
+logic [$clog2(INPUT_QUEUE_DEPTH)-1:0] dmem_queue_head = 0, dmem_queue_tail = 0;
+logic [$clog2(INPUT_QUEUE_DEPTH)-1:0] imem_response_head = 0, imem_response_tail = 0;
+logic [$clog2(INPUT_QUEUE_DEPTH)-1:0] dmem_response_head = 0, dmem_response_tail = 0;
+
+// Queue Status
+logic imem_queue_full, imem_queue_empty;
+logic dmem_queue_full, dmem_queue_empty;
+logic imem_response_valid, dmem_response_valid;
+
+// Queue Control Signals
+logic imem_enqueue, imem_dequeue;
+logic dmem_enqueue, dmem_dequeue;
+
+// Actual memory interface signals
+logic [PHYS_ADDR_SIZE-1:0] imem_addr_actual;
+logic imem_req_actual;
+logic [PHYS_ADDR_SIZE-1:0] dmem_addr_actual;
+logic [XLEN-1:0] dmem_wdata_actual;
+logic [7:0] dmem_wstrb_actual;
+logic dmem_req_actual;
+logic dmem_we_actual;
+
+// Queued response signals
+logic imem_ack_actual;
+logic imem_error_actual;
+logic [ILEN-1:0] imem_data_queued;
+logic dmem_ack_actual;
+logic dmem_error_actual;
+logic [XLEN-1:0] dmem_rdata_queued;
+
+// --------------------------
+// Queue Management Logic
+// --------------------------
+
+// Instruction Memory Queue Control
+assign imem_queue_full = ((imem_queue_tail + 1'b1) == imem_queue_head);
+assign imem_queue_empty = (imem_queue_head == imem_queue_tail);
+assign imem_response_valid = (imem_response_head != imem_response_tail);
+
+always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        imem_queue_head <= 0;
+        imem_queue_tail <= 0;
+        imem_response_head <= 0;
+        imem_response_tail <= 0;
+        for (int i = 0; i < INPUT_QUEUE_DEPTH; i++) begin
+            imem_queue[i].valid <= 0;
+        end
+    end else begin
+        // Enqueue requests
+        if (imem_enqueue && !imem_queue_full) begin
+            imem_queue[imem_queue_tail].addr <= imem_addr;
+            imem_queue[imem_queue_tail].valid <= 1'b1;
+            imem_queue_tail <= imem_queue_tail + 1'b1;
+        end
+        
+        // Dequeue requests
+        if (imem_dequeue && !imem_queue_empty) begin
+            imem_queue[imem_queue_head].valid <= 1'b0;
+            imem_queue_head <= imem_queue_head + 1'b1;
+        end
+        
+        // Enqueue responses
+        if (imem_ack_in) begin
+            imem_response_queue[imem_response_tail].data <= imem_data_in;
+            imem_response_queue[imem_response_tail].ack <= imem_ack_in;
+            imem_response_queue[imem_response_tail].error <= imem_error_in;
+            imem_response_tail <= imem_response_tail + 1'b1;
+        end
+        
+        // Dequeue responses
+        if (imem_response_valid && imem_dequeue) begin
+            imem_response_head <= imem_response_head + 1'b1;
+        end
+    end
+end
+
+// Data Memory Queue Control
+assign dmem_queue_full = ((dmem_queue_tail + 1'b1) == dmem_queue_head);
+assign dmem_queue_empty = (dmem_queue_head == dmem_queue_tail);
+assign dmem_response_valid = (dmem_response_head != dmem_response_tail);
+
+always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        dmem_queue_head <= 0;
+        dmem_queue_tail <= 0;
+        dmem_response_head <= 0;
+        dmem_response_tail <= 0;
+        for (int i = 0; i < INPUT_QUEUE_DEPTH; i++) begin
+            dmem_queue[i].valid <= 0;
+        end
+    end else begin
+        // Enqueue requests
+        if (dmem_enqueue && !dmem_queue_full) begin
+            dmem_queue[dmem_queue_tail].addr <= dmem_addr;
+            dmem_queue[dmem_queue_tail].wdata <= dmem_wdata;
+            dmem_queue[dmem_queue_tail].wstrb <= dmem_wstrb;
+            dmem_queue[dmem_queue_tail].we <= dmem_we;
+            dmem_queue[dmem_queue_tail].valid <= 1'b1;
+            dmem_queue_tail <= dmem_queue_tail + 1'b1;
+        end
+        
+        // Dequeue requests
+        if (dmem_dequeue && !dmem_queue_empty) begin
+            dmem_queue[dmem_queue_head].valid <= 1'b0;
+            dmem_queue_head <= dmem_queue_head + 1'b1;
+        end
+        
+        // Enqueue responses
+        if (dmem_ack_in) begin
+            dmem_response_queue[dmem_response_tail].data <= dmem_rdata;
+            dmem_response_queue[dmem_response_tail].ack <= dmem_ack_in;
+            dmem_response_queue[dmem_response_tail].error <= dmem_error_in;
+            dmem_response_tail <= dmem_response_tail + 1'b1;
+        end
+        
+        // Dequeue responses
+        if (dmem_response_valid && dmem_dequeue) begin
+            dmem_response_head <= dmem_response_head + 1'b1;
+        end
+    end
+end
+
+// --------------------------
+// Queue Interfaces
+// --------------------------
+assign imem_enqueue = imem_req && !imem_queue_full;
+assign imem_dequeue = imem_req_actual && imem_ack_actual;
+
+assign dmem_enqueue = dmem_req && !dmem_queue_full;
+assign dmem_dequeue = dmem_req_actual && dmem_ack_actual;
+
+assign imem_addr_actual = imem_queue[imem_queue_head].addr;
+assign imem_req_actual = imem_queue[imem_queue_head].valid && !imem_queue_empty;
+
+assign dmem_addr_actual = dmem_queue[dmem_queue_head].addr;
+assign dmem_wdata_actual = dmem_queue[dmem_queue_head].wdata;
+assign dmem_wstrb_actual = dmem_queue[dmem_queue_head].wstrb;
+assign dmem_req_actual = dmem_queue[dmem_queue_head].valid && !dmem_queue_empty;
+assign dmem_we_actual = dmem_queue[dmem_queue_head].we;
+
+assign imem_ack_actual = imem_response_valid ? imem_response_queue[imem_response_head].ack : 1'b0;
+
+assign imem_error_actual = imem_response_valid ? imem_response_queue[imem_response_head].error : 1'b0;
+assign imem_data_queued = imem_response_queue[imem_response_head].data;
+
+assign dmem_ack_actual = dmem_response_valid ? dmem_response_queue[dmem_response_head].ack : 1'b0;
+assign dmem_error_actual = dmem_response_valid ? dmem_response_queue[dmem_response_head].error : 1'b0;
+assign dmem_rdata_queued = dmem_response_queue[dmem_response_head].data;
 
 // --------------------------
 // Constants and Types
@@ -187,12 +377,12 @@ logic reg_write_en;
 logic [4:0] reg_write_addr;
 logic [XLEN-1:0] reg_write_data;
 
-// Memory interface assignments
+// Memory interface assignments (now connected through queues)
 assign dmem_addr = execute_result.mem_addr[PHYS_ADDR_SIZE-1:0];
 assign dmem_wdata = execute_result.store_data;
 assign dmem_wstrb = execute_result.mem_wstrb;
 assign dmem_req = (pipeline_state == STAGE_MEMORY) && 
-                  (execute_result.mem_we || decoded_instr.opcode == 7'b0000011);
+                 (execute_result.mem_we || decoded_instr.opcode == 7'b0000011);
 assign dmem_we = execute_result.mem_we;
 
 // --------------------------
@@ -250,7 +440,7 @@ always_comb begin
     end
     
     control_hazard = execute_result.branch_taken;
-    struct_hazard = (pipeline_state == STAGE_MEMORY) && !dmem_ack;
+    struct_hazard = (pipeline_state == STAGE_MEMORY) && !dmem_ack_actual;
 
     // Pipeline control (combinational)
     next_pipeline_state = pipeline_state;
@@ -261,8 +451,8 @@ always_comb begin
             if (rst_n) next_pipeline_state = STAGE_FETCH;
         
         STAGE_FETCH: 
-            if (imem_ack) next_pipeline_state = STAGE_DECODE;
-            else if (imem_error) next_pipeline_state = STAGE_TRAP;
+            if (imem_ack_actual) next_pipeline_state = STAGE_DECODE;
+            else if (imem_error_actual) next_pipeline_state = STAGE_TRAP;
         
         STAGE_DECODE: 
             if (!data_hazard) next_pipeline_state = STAGE_ISSUE;
@@ -274,8 +464,8 @@ always_comb begin
             next_pipeline_state = STAGE_MEMORY;
         
         STAGE_MEMORY: 
-            if (!dmem_req || dmem_ack) next_pipeline_state = STAGE_WRITEBACK;
-            else if (dmem_error) next_pipeline_state = STAGE_TRAP;
+            if (!dmem_req_actual || dmem_ack_actual) next_pipeline_state = STAGE_WRITEBACK;
+            else if (dmem_error_actual) next_pipeline_state = STAGE_TRAP;
         
         STAGE_WRITEBACK: 
             next_pipeline_state = STAGE_FETCH;
@@ -367,13 +557,13 @@ always_ff @(posedge clk or negedge rst_n) begin
         // Instruction Fetch Stage
         // --------------------------
         if (pipeline_state == STAGE_FETCH) begin
-            if (imem_ack) begin
-                fetched_instr <= {32'b0, imem_data};
-                fetch_valid <= !imem_error;
+            if (imem_ack_actual) begin
+                fetched_instr <= {32'b0, imem_data_in};
+                fetch_valid <= !imem_error_actual;
                 
-                if (imem_error) begin
+                if (imem_error_actual) begin
                     csr_mcause <= {1'b0, 63'd1}; // Instruction access fault
-                    csr_mtval <= { {XLEN-PHYS_ADDR_SIZE{1'b0}}, imem_addr};
+                    csr_mtval <= { {XLEN-PHYS_ADDR_SIZE{1'b0}}, imem_addr_actual};
                 end
             end
         end
@@ -613,17 +803,17 @@ always_ff @(posedge clk or negedge rst_n) begin
                 data: 0,
                 rd: execute_result.rd,
                 reg_we: execute_result.reg_we && !execute_result.mem_we,
-                trap: dmem_error,
+                trap: dmem_error_actual,
                 trap_cause: {1'b0, 63'd5},  // Load access fault by default
                 trap_value: execute_result.mem_addr,
                 pc: execute_result.pc
             };
             
             if (execute_result.mem_we) begin
-                if (dmem_error) begin
+                if (dmem_error_actual) begin
                     memory_result.trap_cause <= {1'b0, 63'd7}; // Store access fault
                 end
-            end else if (decoded_instr.opcode == 7'b0000011 && dmem_ack) begin
+            end else if (decoded_instr.opcode == 7'b0000011 && dmem_ack_actual) begin
                 case (decoded_instr.funct3)
                     3'b000: memory_result.data <= {{56{dmem_rdata[7]}}, dmem_rdata[7:0]};  // LB
                     3'b001: memory_result.data <= {{48{dmem_rdata[15]}}, dmem_rdata[15:0]}; // LH
