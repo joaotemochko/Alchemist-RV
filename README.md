@@ -62,6 +62,9 @@ Alchemist RV64 includes:
 - Trust Zone: Physical separation between secure and non-secure zones
 
 ## SIMULATION
+### Nebula Core simulation
+Still working in simulation of input data (imem_data) in queue, because multiples input can be real in a OS, so we simulate the Nebula Core with a Input Queue to write in registers, but is in development in this moment.
+### 
 STILL UNDER DEVELOPMENT, NOT YET SIMULATED FOR ANY USE CASE!
 
 ## 👥 Contributions
