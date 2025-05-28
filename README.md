@@ -64,7 +64,7 @@ Alchemist RV64 includes:
 ## SIMULATION
 ### Nebula Core simulation
 Still working in simulation of input data (imem_data) in queue, because multiples input can be real in a OS, so we simulate the Nebula Core with a Input Queue to write in registers, but is in development in this moment.
-ADDI and ADD instructions has been simulated and passed of testbench in Verilog write in Registers and ALU ADDI/ADD.
+ADDI and ADD instructions has been simulated and passed of testbench in verilator write in Registers and ALU ADDI/ADD.
 ### 
 STILL UNDER DEVELOPMENT, NOT YET SIMULATED FOR ANY USE CASE!
 
