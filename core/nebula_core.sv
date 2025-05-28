@@ -11,7 +11,7 @@ module nebula_core #(
     parameter int HART_ID = 0,
     parameter int XLEN = 64,
     parameter int ILEN = 32,
-    parameter int PHYS_ADDR_SIZE = 56,
+    parameter int PHYS_ADDR_SIZE = 64,
     parameter bit ENABLE_MISALIGNED_ACCESS = 0,
     parameter bit ENABLE_MMU = 1,
     parameter int INPUT_QUEUE_DEPTH = 4
@@ -52,11 +52,17 @@ module nebula_core #(
 
     // Debug interface for testbench
     output wire [PHYS_ADDR_SIZE-1:0] debug_pc,
-    output wire [PHYS_ADDR_SIZE-1:0] debug_next_pc,
+    output wire [XLEN-1:0] debug_next_pc,
     output wire [XLEN-1:0] debug_regfile [0:31],
     output wire [63:0] debug_inst_retired,
     output wire [63:0] debug_cycles,
-    output wire [1:0] debug_privilege
+    output wire [1:0] debug_privilege,
+    output wire [6:0] debug_opcode,
+    output wire debug_valid_instr,
+    output wire [XLEN-1:0] debug_imm,
+    output wire [4:0] debug_rs2,
+    output wire [2:0] debug_funct3,
+    output wire [XLEN-1:0] debug_result_alu
 );
 
 // --------------------------
@@ -66,6 +72,7 @@ typedef struct packed {
     logic [PHYS_ADDR_SIZE-1:0] addr;
     logic valid;
 } imem_queue_entry_t;
+
 
 typedef struct packed {
     logic [PHYS_ADDR_SIZE-1:0] addr;
@@ -78,7 +85,6 @@ typedef struct packed {
 typedef struct packed {
     logic ack;
     logic error;
-    logic [ILEN-1:0] data;
 } imem_response_t;
 
 typedef struct packed {
@@ -94,6 +100,9 @@ dmem_queue_entry_t dmem_queue [0:INPUT_QUEUE_DEPTH-1];
 // Response Queues
 imem_response_t imem_response_queue [0:INPUT_QUEUE_DEPTH-1];
 dmem_response_t dmem_response_queue [0:INPUT_QUEUE_DEPTH-1];
+
+// Data only Queue
+logic [ILEN-1:0] imem_data_in_queue [0:INPUT_QUEUE_DEPTH-1];
 
 // Queue Pointers
 logic [$clog2(INPUT_QUEUE_DEPTH)-1:0] imem_queue_head = 0, imem_queue_tail = 0;
@@ -113,6 +122,7 @@ logic dmem_enqueue, dmem_dequeue;
 // Actual memory interface signals
 logic [PHYS_ADDR_SIZE-1:0] imem_addr_actual;
 logic imem_req_actual;
+logic [ILEN-1:0] imem_data_actual;
 logic [PHYS_ADDR_SIZE-1:0] dmem_addr_actual;
 logic [XLEN-1:0] dmem_wdata_actual;
 logic [7:0] dmem_wstrb_actual;
@@ -159,14 +169,13 @@ always_ff @(posedge clk or negedge rst_n) begin
             imem_queue_head <= imem_queue_head + 1'b1;
         end
         
-        // Enqueue responses
         if (imem_ack_in) begin
-            imem_response_queue[imem_response_tail].data <= imem_data_in;
-            imem_response_queue[imem_response_tail].ack <= imem_ack_in;
-            imem_response_queue[imem_response_tail].error <= imem_error_in;
-            imem_response_tail <= imem_response_tail + 1'b1;
+        imem_data_in_queue[imem_response_tail] <= imem_data_in;
+        imem_response_queue[imem_response_tail].ack <= imem_ack_in;
+        imem_response_queue[imem_response_tail].error <= imem_error_in;
+        imem_response_tail <= imem_response_tail + 1'b1;
         end
-        
+
         // Dequeue responses
         if (imem_response_valid && imem_dequeue) begin
             imem_response_head <= imem_response_head + 1'b1;
@@ -212,7 +221,7 @@ always_ff @(posedge clk or negedge rst_n) begin
             dmem_response_queue[dmem_response_tail].error <= dmem_error_in;
             dmem_response_tail <= dmem_response_tail + 1'b1;
         end
-        
+
         // Dequeue responses
         if (dmem_response_valid && dmem_dequeue) begin
             dmem_response_head <= dmem_response_head + 1'b1;
@@ -238,10 +247,11 @@ assign dmem_wstrb_actual = dmem_queue[dmem_queue_head].wstrb;
 assign dmem_req_actual = dmem_queue[dmem_queue_head].valid && !dmem_queue_empty;
 assign dmem_we_actual = dmem_queue[dmem_queue_head].we;
 
-assign imem_ack_actual = imem_response_valid ? imem_response_queue[imem_response_head].ack : 1'b0;
+assign imem_ack_actual = imem_response_queue[imem_response_head].ack;
+assign imem_data_actual = imem_data_in_queue[imem_response_head];
 
 assign imem_error_actual = imem_response_valid ? imem_response_queue[imem_response_head].error : 1'b0;
-assign imem_data_queued = imem_response_queue[imem_response_head].data;
+assign imem_data_queued = imem_data_in_queue[imem_response_head];
 
 assign dmem_ack_actual = dmem_response_valid ? dmem_response_queue[dmem_response_head].ack : 1'b0;
 assign dmem_error_actual = dmem_response_valid ? dmem_response_queue[dmem_response_head].error : 1'b0;
@@ -250,7 +260,7 @@ assign dmem_rdata_queued = dmem_response_queue[dmem_response_head].data;
 // --------------------------
 // Constants and Types
 // --------------------------
-localparam logic [PHYS_ADDR_SIZE-1:0] PC_RESET = 56'h8000_0000;
+localparam logic [PHYS_ADDR_SIZE-1:0] PC_RESET = 64'h8000_0000;
 localparam MTVEC_DEFAULT = 'h1000_0000;
 
 typedef enum logic [3:0] {
@@ -320,7 +330,7 @@ typedef struct packed {
 // Pipeline Registers
 // --------------------------
 pipeline_state_t pipeline_state, next_pipeline_state;
-logic [PHYS_ADDR_SIZE-1:0] pc, next_pc;
+logic [XLEN-1:0] pc, next_pc;
 logic [XLEN-1:0] regfile [0:31];
 decoded_instr_t decoded_instr;
 execute_result_t execute_result;
@@ -441,26 +451,25 @@ always_comb begin
     
     control_hazard = execute_result.branch_taken;
     struct_hazard = (pipeline_state == STAGE_MEMORY) && !dmem_ack_actual;
-
+    
     // Pipeline control (combinational)
     next_pipeline_state = pipeline_state;
-    next_pc = pc + 4;
-    
+
     case (pipeline_state)
         STAGE_RESET: 
             if (rst_n) next_pipeline_state = STAGE_FETCH;
         
         STAGE_FETCH: 
-            if (imem_ack_actual) next_pipeline_state = STAGE_DECODE;
+            if (imem_ack_actual && imem_data_actual != 32'b0) next_pipeline_state = STAGE_DECODE;
             else if (imem_error_actual) next_pipeline_state = STAGE_TRAP;
         
         STAGE_DECODE: 
-            if (!data_hazard) next_pipeline_state = STAGE_ISSUE;
+            if (!data_hazard && decoded_instr.valid) next_pipeline_state = STAGE_ISSUE;
         
         STAGE_ISSUE:
             next_pipeline_state = STAGE_EXECUTE;
         
-        STAGE_EXECUTE: 
+        STAGE_EXECUTE:
             next_pipeline_state = STAGE_MEMORY;
         
         STAGE_MEMORY: 
@@ -487,11 +496,6 @@ always_comb begin
         pipeline_state != STAGE_TRAP && !debug_halted) begin
         next_pipeline_state = STAGE_TRAP;
     end
-    
-    // Handle control hazards
-    if (execute_result.branch_taken) begin
-        next_pc = execute_result.branch_target[PHYS_ADDR_SIZE-1:0];
-    end
 end
 
 // --------------------------
@@ -508,7 +512,10 @@ always_ff @(posedge clk or negedge rst_n) begin
         debug_halted <= 0;
         cycles <= 0;
         inst_retired <= 0;
-        
+        for (int i = 0; i < 32; i++) begin
+            regfile[i] <= 0;
+        end
+
         // CSR reset
         csr_mstatus <= '0;
         csr_mtvec <= MTVEC_DEFAULT;
@@ -540,11 +547,13 @@ always_ff @(posedge clk or negedge rst_n) begin
     end else begin
         // Performance counters
         cycles <= cycles + 1;
-        
-        // Pipeline state update
+
+        // Update pipeline state and PC
         pipeline_state <= next_pipeline_state;
-        pc <= next_pc;
-        
+        if (!debug_halted && !struct_hazard && next_pc != 0) begin
+            pc <= next_pc;
+        end
+
         // Debug interface
         if (debug_req && !debug_halted) begin
             debug_ack <= 1;
@@ -558,7 +567,7 @@ always_ff @(posedge clk or negedge rst_n) begin
         // --------------------------
         if (pipeline_state == STAGE_FETCH) begin
             if (imem_ack_actual) begin
-                fetched_instr <= {32'b0, imem_data_in};
+                fetched_instr <= {32'b0, imem_data_actual};
                 fetch_valid <= !imem_error_actual;
                 
                 if (imem_error_actual) begin
@@ -589,18 +598,25 @@ always_ff @(posedge clk or negedge rst_n) begin
             
             // Immediate generation
             case (fetched_instr[6:0])
-                7'b0110111, 7'b0010111: // LUI, AUIPC
-                    decoded_instr.imm <= {{32{fetched_instr[31]}}, fetched_instr[31:12], 12'b0};
-                7'b1101111: // JAL
-                    decoded_instr.imm <= {{44{fetched_instr[31]}}, fetched_instr[19:12], fetched_instr[20], fetched_instr[30:21], 1'b0};
-                7'b1100111: // JALR
-                    decoded_instr.imm <= {{53{fetched_instr[31]}}, fetched_instr[30:20]};
-                7'b1100011: // Branches
-                    decoded_instr.imm <= {{52{fetched_instr[31]}}, fetched_instr[7], fetched_instr[30:25], fetched_instr[11:8], 1'b0};
-                7'b0000011, 7'b0010011: // Loads, immediate ALU
-                    decoded_instr.imm <= {{53{fetched_instr[31]}}, fetched_instr[30:20]};
-                7'b0100011: // Stores
-                    decoded_instr.imm <= {{53{fetched_instr[31]}}, fetched_instr[30:25], fetched_instr[11:7]};
+                // LUI, AUIPC
+                7'b0110111, 7'b0010111:
+                    decoded_instr.imm <= {{XLEN-32{fetched_instr[31]}}, fetched_instr[31:12], 12'b0};
+                // JAL
+                7'b1101111:
+                    decoded_instr.imm <= {{XLEN-20{fetched_instr[31]}}, fetched_instr[19:12], fetched_instr[20], fetched_instr[30:21], 1'b0};
+                // JALR
+                7'b1100111:
+                    decoded_instr.imm <= {{XLEN-11{fetched_instr[31]}}, fetched_instr[30:20]};
+                // Branches
+                7'b1100011:
+                    decoded_instr.imm <= {{XLEN-12{fetched_instr[31]}}, fetched_instr[7], fetched_instr[30:25], fetched_instr[11:8], 1'b0};
+                // Loads, immediate ALU
+                7'b0000011, 7'b0010011:
+                    decoded_instr.imm <= {{XLEN-11{fetched_instr[31]}}, fetched_instr[30:20]};
+                // Stores
+                7'b0100011:
+                    decoded_instr.imm <= {{XLEN-11{fetched_instr[31]}}, fetched_instr[30:25], fetched_instr[11:7]};
+
                 default:
                     decoded_instr.imm <= '0;
             endcase
@@ -616,7 +632,7 @@ always_ff @(posedge clk or negedge rst_n) begin
         // --------------------------
         // Execute Stage (Dual ALU)
         // --------------------------
-        if (pipeline_state == STAGE_EXECUTE && decoded_instr.valid && !data_hazard) begin
+        if (pipeline_state == STAGE_EXECUTE && !data_hazard) begin
             // Default values
             execute_result <= '{
                 alu_result: 0,
@@ -651,8 +667,8 @@ always_ff @(posedge clk or negedge rst_n) begin
                 7'b0010011: begin // Immediate operations
                     case (decoded_instr.funct3)
                         3'b000: execute_result.alu_result <= rs1_data + decoded_instr.imm; // ADDI
-                        3'b010: execute_result.alu_result <= ($signed(rs1_data) < $signed(decoded_instr.imm)) ? 64'h1 : 64'h0; // SLTI
-                        3'b011: execute_result.alu_result <= (rs1_data < decoded_instr.imm) ? 64'h1 : 64'h0; // SLTIU
+                        3'b010: execute_result.alu_result <= {{63{1'b0}}, ($signed(rs1_data) < $signed(decoded_instr.imm))}; // SLTI
+                        3'b011: execute_result.alu_result <= {{63{1'b0}}, (rs1_data < decoded_instr.imm)}; // SLTIU
                         3'b100: execute_result.alu_result <= rs1_data ^ decoded_instr.imm; // XORI
                         3'b110: execute_result.alu_result <= rs1_data | decoded_instr.imm; // ORI
                         3'b111: execute_result.alu_result <= rs1_data & decoded_instr.imm; // ANDI
@@ -848,7 +864,21 @@ always_ff @(posedge clk or negedge rst_n) begin
         end else begin
             reg_write_en <= 0;
         end
-        
+            
+        // Branch handling
+        if (execute_result.branch_taken && pipeline_state == STAGE_EXECUTE) begin
+            next_pc <= execute_result.pc;
+        end else if (pipeline_state == STAGE_MEMORY) begin
+            next_pc <= pc + 4;
+        end
+
+        // PC alignment
+        if (next_pc[1:0] != 2'b00 && !ENABLE_MISALIGNED_ACCESS) begin
+            csr_mcause <= {1'b0, 63'd0};  // Instruction address misaligned
+            csr_mtval <= next_pc;
+        end
+
+
         // --------------------------
         // Trap Handling
         // --------------------------
@@ -876,6 +906,12 @@ assign debug_next_pc = next_pc;
 assign debug_regfile = regfile;
 assign debug_inst_retired = inst_retired;
 assign debug_cycles = cycles;
+assign debug_opcode = decoded_instr.opcode;
+assign debug_result_alu = execute_result.alu_result;
+assign debug_valid_instr = decoded_instr.valid;
+assign debug_imm = decoded_instr.imm;
+assign debug_rs2 = decoded_instr.rs2;
+assign debug_funct3 = decoded_instr.funct3;
 assign debug_privilege = current_privilege;
 
 endmodule
