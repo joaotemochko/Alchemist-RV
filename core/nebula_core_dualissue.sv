@@ -61,6 +61,7 @@ module nebula_core_dualissue #(
     output wire [XLEN-1:0] debug_imm,
     output wire [4:0] debug_rs2,
     output wire [2:0] debug_funct3,
+    output wire [6:0] debug_funct7,
     output wire [XLEN-1:0] debug_result_alu1,
     output wire [XLEN-1:0] debug_result_alu2,
     output wire [$clog2(RS_ENTRIES)-1:0] debug_rs_tail,
@@ -559,7 +560,6 @@ function automatic void dispatch_instruction(
     rs[rs_tail].funct7 = instr.funct7;
     rs[rs_tail].imm = instr.imm;
     rs[rs_tail].pc = pc_val;
-    rs[rs_tail].needs_lsq = 1'b1;
     rs[rs_tail].rs_found = 1'b1;
     
     // Verificar operandos
@@ -589,17 +589,15 @@ function automatic void dispatch_instruction(
         rs[rs_tail].rs2_ready = 1'b1;
     end
     
-    rs_tail = rs_tail + 1;
-    
     // Allocate in LSQ only for load/store
-    if (instr.op_type == OP_LOAD || instr.op_type == OP_STORE) begin
+    if (instr.op_type == OP_LOAD || instr.op_type == OP_STORE || instr.op_type == OP_ALU) begin
         lsq[lsq_tail].valid = 1'b1;
         lsq[lsq_tail].state = LSQ_IDLE;
         lsq[lsq_tail].rob_tag = rob_idx;
         lsq[lsq_tail].is_load = (instr.op_type == OP_LOAD);
         lsq[lsq_tail].pc = pc_val;
         lsq[lsq_tail].op_type = instr.op_type;
-
+        rs[rs_tail].needs_lsq = 1'b1;
         if (instr.op_type == OP_STORE) begin
             // Para stores, precisamos do endereço e dados
             if (instr.rs1 != 0 && rename_table[instr.rs1].ready) begin
@@ -623,6 +621,9 @@ function automatic void dispatch_instruction(
         
         lsq_tail = lsq_tail + 1;
     end
+    if (rs[rs_tail] != 0) begin
+       rs_tail = rs_tail + 1; 
+    end
 endfunction
 
 // --------------------------
@@ -637,11 +638,6 @@ always_ff @(posedge clk or negedge rst_n) begin
         execute_result1 = '0;
         alu0_busy = 1'b0;
         alu1_busy = 1'b0;
-    end else if (pipeline_state == STAGE_DECODE) begin
-        execute_result0 = '0;
-        execute_result1 = '0;
-        alu0_busy = 1'b0;
-        alu1_busy = 1'b0;
     end else if (pipeline_state == STAGE_EXECUTE) begin
         // Process up to two instructions per cycle
         for (int i = 0; i < rs_tail; i++) begin
@@ -651,7 +647,6 @@ always_ff @(posedge clk or negedge rst_n) begin
                     execute_result0 = execute_alu(rs[i]);
                     alu0_busy = 1'b1;
                     rs[i].valid = 1'b0;
-                    decoded_instr_pair.instr0 <= decode_instr(fetched_instr0, pc);
                     if (rs[i].needs_lsq) begin
                         for (int j = 0; j < LSQ_ENTRIES; j++) begin
                             if (lsq[j].valid && lsq[j].rob_tag == rs[i].rob_tag) begin
@@ -668,7 +663,6 @@ always_ff @(posedge clk or negedge rst_n) begin
                     execute_result1 = execute_alu(rs[i]);
                     alu1_busy = 1'b1;
                     rs[i].valid = 1'b0;
-                    decoded_instr_pair.instr1 <= decode_instr(fetched_instr1, pc + 4);
                     if (rs[i].needs_lsq) begin
                         for (int j = 0; j < LSQ_ENTRIES; j++) begin
                             if (lsq[j].valid && lsq[j].rob_tag == rs[i].rob_tag) begin
@@ -714,21 +708,20 @@ function automatic execute_result_t execute_alu(input rs_entry_t rs_entry);
                     endcase
                 end
                 7'b0110011: begin // Register-register ALU operations
-                    case (rs_entry.funct3)
-                        3'b000: begin
-                            if (rs_entry.funct7 == 7'b0000000) begin
-                                result.alu_result = rs_entry.rs1_value + rs_entry.rs2_value; // ADD
-                            end else begin
-                                result.alu_result = rs_entry.rs1_value - rs_entry.rs2_value; // SUB
-                            end
+                    case ({rs_entry.funct7, rs_entry.funct3})
+                        {7'b0000000, 3'b000}: begin
+                            result.alu_result = rs_entry.rs1_value + rs_entry.rs2_value; // ADD
                         end
-                        3'b001: result.alu_result = rs_entry.rs1_value << rs_entry.rs2_value[5:0]; // SLL
-                        3'b010: result.alu_result = ($signed(rs_entry.rs1_value) < $signed(rs_entry.rs2_value)) ? 1 : 0; // SLT
-                        3'b011: result.alu_result = (rs_entry.rs1_value < rs_entry.rs2_value) ? 1 : 0; // SLTU
-                        3'b100: result.alu_result = rs_entry.rs1_value ^ rs_entry.rs2_value; // XOR
-                        3'b101: result.alu_result = rs_entry.rs1_value >> rs_entry.rs2_value[5:0]; // SRL/SRA
-                        3'b110: result.alu_result = rs_entry.rs1_value | rs_entry.rs2_value; // OR
-                        3'b111: result.alu_result = rs_entry.rs1_value & rs_entry.rs2_value; // AND
+                        {7'b0100000, 3'b000}: result.alu_result = rs_entry.rs1_value - rs_entry.rs2_value; // SUB
+                        {7'b0000000, 3'b001}: result.alu_result = rs_entry.rs1_value << rs_entry.rs2_value[5:0]; // SLL
+                        {7'b0000000, 3'b010}: result.alu_result = {{63{1'b0}}, ($signed(rs_entry.rs1_value) < $signed(rs_entry.rs2_value))};
+                        {7'b0000000, 3'b011}: result.alu_result = {{63{1'b0}}, (rs_entry.rs1_value < rs_entry.rs2_value)};
+                        {7'b0000000, 3'b100}: result.alu_result = rs_entry.rs1_value ^ rs_entry.rs2_value; // XOR
+                        {7'b0000000, 3'b101}: result.alu_result = rs_entry.rs1_value >> rs_entry.rs2_value[5:0]; // SRL
+                        {7'b0100000, 3'b101}: result.alu_result = ($signed(rs_entry.rs1_value)) >>> rs_entry.rs2_value[5:0]; // SRA
+                        {7'b0000000, 3'b110}: result.alu_result = rs_entry.rs1_value | rs_entry.rs2_value; // OR
+                        {7'b0000000, 3'b111}: result.alu_result = rs_entry.rs1_value & rs_entry.rs2_value; // AND
+                        default: result.illegal_instr = 1;
                     endcase
                 end
                 default: result.alu_result = '0;
@@ -822,10 +815,12 @@ always_ff @(posedge clk or negedge rst_n) begin
         end
     end else if (pipeline_state == STAGE_MEMORY) begin
         // Process up to two memory operations per cycle
+        memory_result0 = '0;
+        memory_result1 = '0;
         mem0_processed = 1'b0;
         mem1_processed = 1'b0;
         
-        for (int i = 0; i < LSQ_ENTRIES; i++) begin
+        for (int i = 0; i < lsq_tail; i++) begin
             if (lsq[i].valid && !lsq[i].completed) begin
                 if (!mem0_processed) begin
                     // Process first memory operation
@@ -838,17 +833,19 @@ always_ff @(posedge clk or negedge rst_n) begin
                         dmem_req = 1'b1;
                         dmem_we = 1'b0;
                         
-                        if (decoded_instr_pair.instr0.opcode == 7'b0000011) begin
-                            case (decoded_instr_pair.instr0.funct3)
-                                3'b000: memory_result0.data = {{56{dmem_rdata[7]}}, dmem_rdata[7:0]};  // LB
-                                3'b001: memory_result0.data = {{48{dmem_rdata[15]}}, dmem_rdata[15:0]}; // LH
-                                3'b010: memory_result0.data = {{32{dmem_rdata[31]}}, dmem_rdata[31:0]}; // LW
-                                3'b011: memory_result0.data = dmem_rdata;  // LD
-                                3'b100: memory_result0.data = {56'b0, dmem_rdata[7:0]};  // LBU
-                                3'b101: memory_result0.data = {48'b0, dmem_rdata[15:0]}; // LHU
-                                3'b110: memory_result0.data = {32'b0, dmem_rdata[31:0]}; // LWU
-                                default: memory_result0.data = '0;
-                            endcase
+                        if (dmem_ack_in) begin
+                            if (decoded_instr_pair.instr0.opcode == 7'b0000011) begin
+                                case (decoded_instr_pair.instr0.funct3)
+                                    3'b000: memory_result0.data = {{56{dmem_rdata[7]}}, dmem_rdata[7:0]};  // LB
+                                    3'b001: memory_result0.data = {{48{dmem_rdata[15]}}, dmem_rdata[15:0]}; // LH
+                                    3'b010: memory_result0.data = {{32{dmem_rdata[31]}}, dmem_rdata[31:0]}; // LW
+                                    3'b011: memory_result0.data = dmem_rdata;  // LD
+                                    3'b100: memory_result0.data = {56'b0, dmem_rdata[7:0]};  // LBU
+                                    3'b101: memory_result0.data = {48'b0, dmem_rdata[15:0]}; // LHU
+                                    3'b110: memory_result0.data = {32'b0, dmem_rdata[31:0]}; // LWU
+                                    default: memory_result0.data = '0;
+                                endcase
+                            end
                         end
                     end else begin
                         // Store operation
@@ -858,8 +855,8 @@ always_ff @(posedge clk or negedge rst_n) begin
                         dmem_req = 1'b1;
                         dmem_we = 1'b1;
                         
-                        memory_result0.data = execute_result0.alu_result;
                         if (dmem_ack_in) begin
+                            memory_result0.data = execute_result0.alu_result;
                             lsq[i].completed = 1'b1;
                             mem0_processed = 1'b1;
                         end
@@ -875,15 +872,19 @@ always_ff @(posedge clk or negedge rst_n) begin
                         dmem_req = 1'b1;
                         dmem_we = 1'b0;
                         
-                        if (dmem_ack_in) begin
-                            case (lsq[i].size)
-                                2'b00: memory_result1.data = {{56{dmem_rdata[7]}}, dmem_rdata[7:0]};  // LB
-                                2'b01: memory_result1.data = {{48{dmem_rdata[15]}}, dmem_rdata[15:0]}; // LH
-                                2'b10: memory_result1.data = {{32{dmem_rdata[31]}}, dmem_rdata[31:0]}; // LW
-                                2'b11: memory_result1.data = dmem_rdata;  // LD
-                            endcase
-                            lsq[i].completed = 1'b1;
-                            mem1_processed = 1'b1;
+                        if (imem_ack_in) begin
+                            if (decoded_instr_pair.instr0.opcode == 7'b0000011) begin
+                                case (decoded_instr_pair.instr0.funct3)
+                                    3'b000: memory_result1.data = {{56{dmem_rdata[7]}}, dmem_rdata[7:0]};  // LB
+                                    3'b001: memory_result1.data = {{48{dmem_rdata[15]}}, dmem_rdata[15:0]}; // LH
+                                    3'b010: memory_result1.data = {{32{dmem_rdata[31]}}, dmem_rdata[31:0]}; // LW
+                                    3'b011: memory_result1.data = dmem_rdata;  // LD
+                                    3'b100: memory_result1.data = {56'b0, dmem_rdata[7:0]};  // LBU
+                                    3'b101: memory_result1.data = {48'b0, dmem_rdata[15:0]}; // LHU
+                                    3'b110: memory_result1.data = {32'b0, dmem_rdata[31:0]}; // LWU
+                                    default: memory_result1.data = '0;
+                                endcase
+                            end
                         end
                     end else begin
                         // Store operation
@@ -892,8 +893,8 @@ always_ff @(posedge clk or negedge rst_n) begin
                         dmem_wstrb = lsq[i].wstrb;
                         dmem_req = 1'b1;
                         dmem_we = 1'b1;
-                        
                         if (dmem_ack_in) begin
+                            memory_result1.data = execute_result1.alu_result;
                             lsq[i].completed = 1'b1;
                             mem1_processed = 1'b1;
                         end
@@ -926,36 +927,61 @@ always_ff @(posedge clk or negedge rst_n) begin
         commit1_done = 1'b0;
         
         for (int i = 0; i < rob_head; i++) begin
-        // First instruction commit
-        if (rob[i].valid && rob[i].completed) begin
-            // Write back to architectural register file
-            
-            if (rob[i].arch_reg != 0 && execute_result0 != 0) begin
-                arch_regfile[execute_result0.rd] = memory_result0.data;
-                execute_result0 = '0;
-            end else if (rob[i].arch_reg != 0 && execute_result1 != 0) begin
-                arch_regfile[execute_result1.rd] = memory_result1.data;
-                execute_result1 = '0;
+            // First instruction commit
+            if (rob[i].valid) begin
+
+                if (!commit0_done) begin
+                // Write back to architectural register file
+                
+                    if (rob[i].arch_reg != 0) begin
+                        arch_regfile[rob[i].arch_reg] = memory_result0.data;
+                    end
+                    
+                    // Free physical register if it was renamed
+                    if (rename_table[rob[i].arch_reg].valid) begin
+                        free_list[rename_table[rob[i].arch_reg].phys_reg] = 1'b1;
+                        free_list_count = free_list_count + 1;
+                        rename_table[rob[i].arch_reg].valid = 1'b0;
+                    end
+                    
+                    // Update performance counter
+                    inst_retired <= inst_retired + 1;
+                    commit0_done = 1'b1;
+                end else if (!commit1_done) begin
+                    // Write back to architectural register file
+
+                    if (rob[i].arch_reg != 0) begin
+                        arch_regfile[rob[i].arch_reg] = memory_result1.data;
+                    end
+
+                    // Free physical register if it was renamed
+                    if (rename_table[rob[i].arch_reg].valid) begin
+                        free_list[rename_table[rob[i].arch_reg].phys_reg] = 1'b1;
+                        free_list_count = free_list_count + 1;
+                        rename_table[rob[i].arch_reg].valid = 1'b0;
+                    end
+
+                    // Update performance counter
+                    inst_retired <= inst_retired + 1;
+                    commit1_done = 1'b1;
+                end
             end
-            
-            // Free physical register if it was renamed
-            if (rename_table[rob[i].arch_reg].valid) begin
-                free_list[rename_table[rob[i].arch_reg].phys_reg] = 1'b1;
-                free_list_count = free_list_count + 1;
-                rename_table[rob[i].arch_reg].valid = 1'b0;
+
+            if (commit0_done || commit1_done) begin
+                rs[i] = '0;
+                rob[i] = '0;
             end
-            
-            // Update performance counter
-            inst_retired <= inst_retired + 1;
-            commit0_done = 1'b1;
-        end
-            
-            // Update performance counter
-            inst_retired <= inst_retired + 1;
-            commit1_done = 1'b1;
         end
 
         rob_head = '0;
+        rob_tail = '0;
+        lsq_tail = '0;
+        rs_tail = '0;
+        decoded_instr_pair <= '0;
+        execute_result0 = '0;
+        execute_result1 = '0;
+        alu0_busy = '0;
+        alu1_busy = '0;
     end
 end
 
@@ -1071,6 +1097,7 @@ assign debug_valid_instr = decoded_instr_pair.instr0.valid;
 assign debug_imm = decoded_instr_pair.instr0.imm;
 assign debug_rs2 = decoded_instr_pair.instr0.rs2;
 assign debug_funct3 = decoded_instr_pair.instr0.funct3;
+assign debug_funct7 = decoded_instr_pair.instr0.funct7;
 assign debug_privilege = current_privilege;
 assign debug_rs_tail = rs_tail;
 assign debug_decoded_instr0 = decoded_instr_pair.instr0;
