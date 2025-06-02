@@ -59,7 +59,8 @@ module nebula_core_dualissue #(
     output wire [6:0] debug_opcode,
     output wire debug_valid_instr,
     output wire [XLEN-1:0] debug_imm,
-    output wire [4:0] debug_rs2,
+    output wire [XLEN-1:0] debug_rs1,
+    output wire [XLEN-1:0] debug_rs2,
     output wire [2:0] debug_funct3,
     output wire [6:0] debug_funct7,
     output wire [XLEN-1:0] debug_result_alu1,
@@ -68,7 +69,9 @@ module nebula_core_dualissue #(
     output wire [99:0] debug_decoded_instr0,
     output wire [99:0] debug_decoded_instr1,
     output wire [2:0] debug_optype0,
-    output wire [2:0] debug_optype1
+    output wire [2:0] debug_optype1,
+    output wire [4:0] debug_instruction_rs2,
+    output wire [4:0] debug_arch_reg
 );
 
 // --------------------------
@@ -126,7 +129,6 @@ typedef struct packed {
 
 typedef struct packed {
     logic [XLEN-1:0] alu_result;
-    logic [XLEN-1:0] alu2_result;
     logic [XLEN-1:0] mem_addr;
     logic [XLEN-1:0] store_data;
     logic [4:0] rd;
@@ -336,7 +338,7 @@ always_ff @(posedge clk or negedge rst_n) begin
             fetch_valid0 <= !imem_error_in;
             
             // Try to fetch second instruction if aligned and no error
-            if (pc[2:0] == 0 && !imem_error_in) begin
+            if (!imem_error_in) begin
                 fetched_instr1 <= {32'b0, imem_data_in1};
                 fetch_valid1 <= !imem_error_in;
             end else begin
@@ -518,11 +520,11 @@ always @(posedge clk or negedge rst_n) begin
     end else if (pipeline_state == STAGE_DISPATCH) begin
         if (decoded_instr_pair.dual_issue_valid && decoded_instr_pair.instr0.rd != 0) begin
             // Allocate ROB entries
-            rob[rob_tail].valid = 1'b1;
-            rob[rob_tail].completed = 1'b0;
-            rob[rob_tail].arch_reg = decoded_instr_pair.instr0.rd;
-            rob[rob_tail].phys_reg = rename_table[decoded_instr_pair.instr0.rd].phys_reg;
-            rob[rob_tail].pc = pc;
+            rob[decoded_instr_pair.instr0.rd].valid = 1'b1;
+            rob[decoded_instr_pair.instr0.rd].completed = 1'b0;
+            rob[decoded_instr_pair.instr0.rd].arch_reg = decoded_instr_pair.instr0.rd;
+            rob[decoded_instr_pair.instr0.rd].phys_reg = rename_table[decoded_instr_pair.instr0.rd].phys_reg;
+            rob[decoded_instr_pair.instr0.rd].pc = pc;
             
             rob_tail = rob_tail + 1;
             
@@ -532,11 +534,11 @@ always @(posedge clk or negedge rst_n) begin
         end
         if (decoded_instr_pair.dual_issue_valid && decoded_instr_pair.instr1.rd != 0) begin
             // Allocate ROB entries
-            rob[rob_tail].valid = 1'b1;
-            rob[rob_tail].completed = 1'b0;
-            rob[rob_tail].arch_reg = decoded_instr_pair.instr1.rd;
-            rob[rob_tail].phys_reg = rename_table[decoded_instr_pair.instr1.rd].phys_reg;
-            rob[rob_tail].pc = pc;
+            rob[decoded_instr_pair.instr1.rd].valid = 1'b1;
+            rob[decoded_instr_pair.instr1.rd].completed = 1'b0;
+            rob[decoded_instr_pair.instr1.rd].arch_reg = decoded_instr_pair.instr1.rd;
+            rob[decoded_instr_pair.instr1.rd].phys_reg = rename_table[decoded_instr_pair.instr1.rd].phys_reg;
+            rob[decoded_instr_pair.instr1.rd].pc = pc;
             
             rob_tail = rob_tail + 1;
             
@@ -562,29 +564,44 @@ function automatic void dispatch_instruction(
     rs[rs_tail].pc = pc_val;
     rs[rs_tail].rs_found = 1'b1;
     
-    // Verificar operandos
+   // Check RS1 operand
     if (instr.rs1 != 0) begin
+        // Check physical register file first
         if (rename_table[instr.rs1].ready) begin
             rs[rs_tail].rs1_value = phys_regfile[rename_table[instr.rs1].phys_reg].value;
             rs[rs_tail].rs1_ready = 1'b1;
+        end 
+        // Check ROB for completed instructions that might have this result
+        else begin
+                if (rob[instr.rs1].valid && rob[instr.rs1].completed) begin
+                    rs[rs_tail].rs1_value = rob[instr.rs1].result;
+                    rs[rs_tail].rs1_ready = 1'b1;
+                end
+            end
         end else begin
-            rs[rs_tail].rs1_value = '0;
-            rs[rs_tail].rs1_ready = 1'b0;
-        end
-    end else begin
+        // x0 is always ready and zero
         rs[rs_tail].rs1_value = '0;
         rs[rs_tail].rs1_ready = 1'b1;
     end
     
+    // Check RS2 operand
     if (instr.rs2 != 0) begin
+        // Check physical register file first
         if (rename_table[instr.rs2].ready) begin
             rs[rs_tail].rs2_value = phys_regfile[rename_table[instr.rs2].phys_reg].value;
             rs[rs_tail].rs2_ready = 1'b1;
+        end 
+        // Check ROB for completed instructions that might have this result
+        else begin
+                debug_arch_reg = rob[instr.rs2].arch_reg;
+                debug_instruction_rs2 = instr.rs2;
+                if (rob[instr.rd].valid && rob[instr.rs2].completed) begin
+                    rs[rs_tail].rs2_value = rob[instr.rs2].result;
+                    rs[rs_tail].rs2_ready = 1'b1;
+                end
+            end
         end else begin
-            rs[rs_tail].rs2_value = '0;
-            rs[rs_tail].rs2_ready = 1'b0;
-        end
-    end else begin
+        // x0 is always ready and zero
         rs[rs_tail].rs2_value = '0;
         rs[rs_tail].rs2_ready = 1'b1;
     end
@@ -644,6 +661,8 @@ always_ff @(posedge clk or negedge rst_n) begin
             if (rs[i].valid && rs[i].rs_found) begin
                 if (!alu0_busy) begin
                     // Execute on ALU0
+                    debug_rs1 = rs[i].rs1_value;
+                    debug_rs2 = rs[i].rs2_value;
                     execute_result0 = execute_alu(rs[i]);
                     alu0_busy = 1'b1;
                     rs[i].valid = 1'b0;
@@ -704,14 +723,12 @@ function automatic execute_result_t execute_alu(input rs_entry_t rs_entry);
                         3'b100: result.alu_result = rs_entry.rs1_value ^ rs_entry.imm; // XORI
                         3'b110: result.alu_result = rs_entry.rs1_value | rs_entry.imm; // ORI
                         3'b001: result.alu_result = rs_entry.rs1_value << rs_entry.imm[5:0]; // SLLI
-                        default: result.alu_result = '0;
+                        default: result.illegal_instr = 1;
                     endcase
                 end
                 7'b0110011: begin // Register-register ALU operations
                     case ({rs_entry.funct7, rs_entry.funct3})
-                        {7'b0000000, 3'b000}: begin
-                            result.alu_result = rs_entry.rs1_value + rs_entry.rs2_value; // ADD
-                        end
+                        {7'b0000000, 3'b000}: result.alu_result = rs_entry.rs1_value + rs_entry.rs2_value; // ADD
                         {7'b0100000, 3'b000}: result.alu_result = rs_entry.rs1_value - rs_entry.rs2_value; // SUB
                         {7'b0000000, 3'b001}: result.alu_result = rs_entry.rs1_value << rs_entry.rs2_value[5:0]; // SLL
                         {7'b0000000, 3'b010}: result.alu_result = {{63{1'b0}}, ($signed(rs_entry.rs1_value) < $signed(rs_entry.rs2_value))};
@@ -926,55 +943,55 @@ always_ff @(posedge clk or negedge rst_n) begin
         commit0_done = 1'b0;
         commit1_done = 1'b0;
         
-        for (int i = 0; i < rob_head; i++) begin
             // First instruction commit
-            if (rob[i].valid) begin
-
-                if (!commit0_done) begin
+                if (!commit0_done && rob[decoded_instr_pair.instr0.rd].valid) begin
                 // Write back to architectural register file
                 
-                    if (rob[i].arch_reg != 0) begin
-                        arch_regfile[rob[i].arch_reg] = memory_result0.data;
+                    if (rob[decoded_instr_pair.instr0.rd].arch_reg != 0) begin
+                        arch_regfile[rob[decoded_instr_pair.instr0.rd].arch_reg] = memory_result0.data;
+                        rob[decoded_instr_pair.instr0.rd].result = execute_result0.alu_result;
+                        rob[decoded_instr_pair.instr0.rd].completed = 1'b1;
                     end
                     
                     // Free physical register if it was renamed
-                    if (rename_table[rob[i].arch_reg].valid) begin
-                        free_list[rename_table[rob[i].arch_reg].phys_reg] = 1'b1;
+                    if (rename_table[rob[decoded_instr_pair.instr0.rd].arch_reg].valid) begin
+                        free_list[rename_table[rob[decoded_instr_pair.instr0.rd].arch_reg].phys_reg] = 1'b1;
                         free_list_count = free_list_count + 1;
-                        rename_table[rob[i].arch_reg].valid = 1'b0;
+                        rename_table[rob[decoded_instr_pair.instr0.rd].arch_reg].valid = 1'b0;
                     end
                     
                     // Update performance counter
                     inst_retired <= inst_retired + 1;
                     commit0_done = 1'b1;
-                end else if (!commit1_done) begin
+                end 
+                if (!commit1_done && rob[decoded_instr_pair.instr1.rd].valid) begin
                     // Write back to architectural register file
 
-                    if (rob[i].arch_reg != 0) begin
-                        arch_regfile[rob[i].arch_reg] = memory_result1.data;
+                    if (rob[decoded_instr_pair.instr1.rd].arch_reg != 0) begin
+                        arch_regfile[rob[decoded_instr_pair.instr1.rd].arch_reg] = memory_result1.data;
+                        rob[decoded_instr_pair.instr1.rd].result = execute_result1.alu_result;
+                        rob[decoded_instr_pair.instr1.rd].completed = 1'b1;
                     end
 
                     // Free physical register if it was renamed
-                    if (rename_table[rob[i].arch_reg].valid) begin
-                        free_list[rename_table[rob[i].arch_reg].phys_reg] = 1'b1;
+                    if (rename_table[rob[decoded_instr_pair.instr1.rd].arch_reg].valid) begin
+                        free_list[rename_table[rob[decoded_instr_pair.instr1.rd].arch_reg].phys_reg] = 1'b1;
                         free_list_count = free_list_count + 1;
-                        rename_table[rob[i].arch_reg].valid = 1'b0;
+                        rename_table[rob[decoded_instr_pair.instr1.rd].arch_reg].valid = 1'b0;
                     end
 
                     // Update performance counter
                     inst_retired <= inst_retired + 1;
                     commit1_done = 1'b1;
                 end
+            for (int i = 0; i < rs_tail; i++) begin
+                if (commit0_done || commit1_done) begin
+                    rs[i] = '0;
+                    lsq[i] = '0;
+                end
             end
+        
 
-            if (commit0_done || commit1_done) begin
-                rs[i] = '0;
-                rob[i] = '0;
-            end
-        end
-
-        rob_head = '0;
-        rob_tail = '0;
         lsq_tail = '0;
         rs_tail = '0;
         decoded_instr_pair <= '0;
@@ -1095,7 +1112,6 @@ assign debug_result_alu1 = execute_result0.alu_result;
 assign debug_result_alu2 = execute_result1.alu_result;
 assign debug_valid_instr = decoded_instr_pair.instr0.valid;
 assign debug_imm = decoded_instr_pair.instr0.imm;
-assign debug_rs2 = decoded_instr_pair.instr0.rs2;
 assign debug_funct3 = decoded_instr_pair.instr0.funct3;
 assign debug_funct7 = decoded_instr_pair.instr0.funct7;
 assign debug_privilege = current_privilege;
