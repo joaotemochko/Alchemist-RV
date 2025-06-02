@@ -22,7 +22,7 @@ Alchemist RV is a heterogeneous 64-bit RISC-V based System-on-Chip (SoC) archite
 - Microarchitecture: Nebula RV64I  
 - ISA: RV64I (64-bit integer base)  
 - Frequency: 1.8 GHz  
-- Pipeline: 8 stages, in-order execution  
+- Pipeline: 8 stages, out-of-order execution  
 - Cache: L1 32KB (I+D) per core, L2 512KB shared
 
 ### 🎮 GPU - "Krypton"
@@ -64,6 +64,7 @@ Alchemist RV64 includes:
 ## SIMULATION
 ### Nebula Core simulation
 Still working in simulation of input data (imem_data) in queue, because multiples input can be real in a OS, so we simulate the Nebula Core with a Input Queue to write in registers, but is in development in this moment.
+ADDI and ADD instructions has been simulated and passed of testbench in verilator write in Registers and ALU ADDI/ADD.
 ### 
 STILL UNDER DEVELOPMENT, NOT YET SIMULATED FOR ANY USE CASE!
 
