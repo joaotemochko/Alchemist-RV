@@ -22,7 +22,7 @@ Alchemist RV is a heterogeneous 64-bit RISC-V based System-on-Chip (SoC) archite
 - Microarchitecture: Nebula RV64I  
 - ISA: RV64I (64-bit integer base)  
 - Frequency: 1.8 GHz  
-- Pipeline: 8 stages, out-of-order execution  
+- Pipeline: 8 stages, out-of-order execution (2 instructions per clock) / 8 stages, in-order execution (1 instruction per clock)
 - Cache: L1 32KB (I+D) per core, L2 512KB shared
 
 ### 🎮 GPU - "Krypton"
