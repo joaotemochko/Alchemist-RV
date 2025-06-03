@@ -26,7 +26,7 @@ Alchemist RV is a heterogeneous 64-bit RISC-V based System-on-Chip (SoC) archite
 - Cache: L1 32KB (I+D) per core, L2 512KB shared
 
 ### 🎮 GPU - "Krypton"
-- Architecture: RISC-V based with proprietary graphic extensions  
+- Microarchitecture: Krypton RV GPU  
 - Supported APIs: Vulkan 1.3, OpenGL ES 3.2, OpenCL 3.0, Ray Tracing API
 
 ### 🧠 Dedicated Accelerators
