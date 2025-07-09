@@ -11,7 +11,7 @@ Alchemist RV is a heterogeneous 64-bit RISC-V based System-on-Chip (SoC) archite
 - Configuration: Hybrid big.LITTLE architecture with integrated GPU
 
 ### 🌟 Big Cores - "Supernova"
-- Microarchitecture: Supernova RV64GCBV  
+- Microarchitecture actual: 1st gen "Supernova" 
 - ISA: RV64GC (RV64IMAFDC) + B (Bit Manipulation) and V (Vector) extensions  
 - Frequency: 2.8 GHz - 3.5 GHz (boost)  
 - Pipeline: 12 stages, superscalar, out-of-order execution  
@@ -19,20 +19,18 @@ Alchemist RV is a heterogeneous 64-bit RISC-V based System-on-Chip (SoC) archite
 
 ### 💫 Little Cores - "Nebula"
 ![RTL Nebula Core](./img/nebula_core_RTLView_page-0001.jpg)
-- Microarchitecture: Nebula RV64I  
+- Microarchitecture actual: 1st gen "Nebula" 
 - ISA: RV64I (64-bit integer base)  
 - Frequency: 1.8 GHz  
 - Pipeline: 8 stages, in-order execution (2 instructions per clock)
 - Cache: L1 32KB (I+D) per core, L2 512KB shared
 
 ### 🎮 GPU - "Krypton"
-- Microarchitecture: Krypton RV GPU  
+- Microarchitecture actual: 1st gen "Krypton"
 - Supported APIs: Vulkan 1.3, OpenGL ES 3.2, OpenCL 3.0, Ray Tracing API
 
 ### 🧠 Dedicated Accelerators
 - NPU: 20 TOPS for AI workloads  
-- ISP: Image processing up to 4K60 HDR  
-- VPU: Encoding/decoding up to 8K60 or 4K240  
 - DSP: Audio and sensor processing  
 - Cryptography Engine: Hardware acceleration of cryptographic algorithms
 
